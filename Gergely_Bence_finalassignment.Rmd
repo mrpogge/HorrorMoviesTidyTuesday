@@ -1,0 +1,305 @@
+---
+title: "Rating Blood - What attribute predicts the average rating of horror movies?"
+author: "Bence Gergely"
+date: "2022-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+## Introduction
+
+This is a data analysis project based on the Tidy Tuesday dataset called Horror Movies (2022-11-01). In this project we are interested in what predicts the average rating of the viewers. First we are going to read the dataset, then we will clean and explore it. Based on the overviews we will explore the main topics of the films using a Latent Dirichlet Allocator. Then we will fit a linear model with the average rating being the dependent variable and the predictors chosen from the dataset.
+
+## Dependencies
+In this project we mainly use packages from tidyverse when it comes to data wrangling.
+The topic modelling will be made with topicmodels and for the linear model we will use the lm function.
+
+```{r dependencies}
+library(qgraph)
+library(tidyverse)
+library(tidytuesdayR)
+library(tidytext)
+library(topicmodels)
+library(car)
+```
+
+## Reading the dataset
+We will use the built in tool to load tidy tuesday data.
+
+```{r loading}
+tt_horror_data = tt_load("2022-11-01")
+```
+
+```{r renaming}
+df = as.data.frame(tt_horror_data[[1]])
+```
+
+## Data cleaning
+
+In this case we are going to exclude films that are unreleased, had no revenue (or no information about the revenue), had no budget (or no information about the budget) or we have no information about the movie runtime. Moreover we will not use the title, tagline, backdrop path, the collection and collection name variables. 
+
+```{r data_cleaning}
+
+df_clean =  df %>%
+              select(-title, -tagline, -poster_path, -backdrop_path, -collection, -collection_name) %>%
+              filter(budget != 0 & revenue != 0 & runtime != 0 & status =="Released") %>%
+              select(-status)
+
+```
+
+We will dummy code the genre names variable, so each genre will become a new binary variable. After extracting the genre names and we created a binary variable for each, we can see that the most frequent subgenre is Mystery and Thriller.
+```{r string_cleaning}
+
+genre_list = list()
+
+#cleaning the genre variables
+for(i in 1:length(df_clean[,1])){
+  genre_list[[i]] = unlist(str_split(df_clean[i, "genre_names"], ", "))
+}
+
+#extracting all the genres 
+all_genres = unique(unlist(genre_list))
+dummy_matrix = matrix(0, nrow = nrow(df_clean), ncol = length(all_genres))
+colnames(dummy_matrix) = all_genres
+
+#filling the dummy matrix with entries
+for(k in 1:length(genre_list)){
+  for(l in all_genres){
+    dummy_matrix[k,l] = as.numeric(l %in% genre_list[[k]])
+  }
+}
+
+# printing out the count of each genres
+print(colSums(dummy_matrix))
+
+#creating a dataframe and binding it to the cleaned data
+
+dummy_dataframe = as.data.frame(dummy_matrix)
+df_clean = cbind(df_clean, dummy_dataframe)
+```
+We are creating a new variable from the budget and revenue which will represent the difference between the revenue and the budget.
+```{r box_office_diff}
+df_clean = df_clean %>%
+              mutate(box_office_difference = revenue - budget)
+```
+
+We extract the years of the films.
+```{r release_year}
+
+df_clean = df_clean %>%
+              mutate(release_year = lubridate::year(release_date),
+                     release_month = lubridate::month(release_date)) %>%
+              mutate(release_rank = rank(release_year))
+
+```
+
+## Exploratory data analyis
+First we present the mean and standard deviation of the box office difference, and the rating variable, the minimum, maximum, range, median and median absolute deviation of the year variable.
+
+
+```{r exploratory_analysis1}
+
+#box_office difference descriptive statistics
+bo_diff = as.vector(df_clean[,"box_office_difference"])
+
+mean_bo_diff = mean(bo_diff, na.rm = TRUE)
+sd_bo_diff = sd(bo_diff, na.rm = TRUE)
+min_bo_diff = min(bo_diff)
+max_bo_diff = max(bo_diff)
+
+#rating descriptive statistics
+rating = as.vector(df_clean[, "vote_average"])
+
+mean_rating = mean(rating, na.rm = TRUE)
+sd_rating = sd(rating, na.rm = TRUE)
+min_rating = min(rating)
+max_rating = max(rating)
+
+
+#creating table for the variables
+report1 = data.frame(descriptives = c("mean", "standard_deviation", "minimum", "maximum"),
+                     value_bo_diff = c(mean_bo_diff, sd_bo_diff, min_bo_diff, max_bo_diff),
+                     value_rating = c(mean_rating, sd_rating, min_rating, max_rating))
+
+print(report1)
+
+#year descriptive statistics
+year = as.vector(df_clean[, "release_year"])
+
+min_year = min(year)
+max_year = max(year)
+range_year = max_year - min_year
+median_year = median(year)
+mad_year = mad(year)
+
+#creating a table for the year
+report2 = data.frame(descriptives = c("median", "median_abs_deviation", "minimum", "maximum", "range"),
+                     values_year = c(median_year, mad_year, min_year, max_year, range_year))
+
+print(report2)
+```
+In this part of the exploratory data analysis we are going to present the average rating of each genres and genre combinations if possible. We omit the horror genre since every film need to be in this category and the categories which apply to less then a hundred films (based on the previously seen table).
+```{r exploratory_analysis2}
+
+#mean differences per genre
+genres = df_clean %>% 
+          select(vote_average, Mystery:Comedy, Crime)
+
+avg_mystery = genres %>%
+                group_by(Mystery) %>%
+                summarise(Mystery = mean(vote_average))
+
+avg_thriller = genres %>%
+                group_by(Thriller) %>%
+                summarise(Thriller = mean(vote_average))
+
+avg_scifi = genres %>%
+                group_by(`Science Fiction`) %>%
+                summarise(Scifi = mean(vote_average))
+
+avg_drama = genres %>%
+                group_by(Drama) %>%
+                summarise(Drama = mean(vote_average))
+
+avg_action = genres %>%
+                group_by(Action) %>%
+                summarise(Action = mean(vote_average))
+
+avg_comedy  = genres %>%
+                group_by(Comedy) %>%
+                summarise(Comedy = mean(vote_average))
+
+mean_differences_per_genre = cbind(avg_scifi, avg_mystery, avg_thriller, avg_drama, avg_action, avg_comedy)
+colnames(mean_differences_per_genre)[1] = "genre (no/yes)"
+print(mean_differences_per_genre)
+
+#averages for all possible combinations
+avg_cross_prod = genres %>%
+                  group_by(`Science Fiction`, Action, Comedy, Thriller, Mystery, Drama) %>%
+                  summarise(overall = mean(vote_average))
+
+print(avg_cross_prod)
+
+```
+
+Last we are going to plot the relationship of the Year and the average rating, and we are going to colour code the box_office_diff variable
+
+```{r exploratory_analysis3}
+
+#creating the plot
+p = ggplot(df_clean, aes(x = release_year, y = vote_average, colour = box_office_difference / 1000000, size = popularity)) +
+      geom_point() + geom_smooth(method = "lm")
+
+#designing the plot
+p = p + ggtitle("Relationship between release year and average rating") +
+      xlab("Release Year") +
+      ylab("Average rating") +
+      scale_color_viridis_c() + 
+      guides(colour = guide_legend(title="Revenue - Budget (M)")) +
+      guides(size = guide_legend(title="Popularity")) +
+      theme(legend.position = "bottom")
+p
+```
+
+## Exploratory analysis 3: Topic modeling
+We are going to perform an LDA (Latent Dirichlet Allocator), to extract the topics. Evaluating the goodness of the classification in the case of LDA is relatively demanding, as you can either perform multiple fits with similar settings and examine the variability of the topics, or one can perform a qualitative fit evaluation with multiple raters. Or there are versions of this algorithm which can also estimate the number of topics based on the data using Reversible Jump MCMC, but that can be time consuming. 
+
+So for this analysis we will treat LDA as an explorative analysis step.
+
+```{r topic_cleaning}
+
+#select title and overview variables
+df_LDA = df_clean %>% 
+          select(original_title, overview)
+
+#tokenize the overviews per movie
+by_word = df_LDA %>%
+            unnest_tokens(word, overview)
+
+#find the document word counts
+word_counts = by_word %>% 
+                anti_join(stop_words) %>%
+                count(original_title, word, sort = TRUE)
+
+#fit the Latent  Dirichlet Allocator
+overview_dtm = word_counts %>%
+                cast_dtm(original_title, word, n)
+
+overview_LDA = LDA(overview_dtm, k = 7)
+
+#understanding the results
+
+overview_topics <- tidy(overview_LDA, matrix = "beta")
+
+#finding the top terms of the overviews
+top_terms = overview_topics %>%
+              group_by(topic) %>%
+              slice_max(beta, n = 10) %>% 
+              ungroup() %>%
+              arrange(topic, -beta)
+
+top_terms %>%
+  mutate(term = reorder_within(term, beta, topic)) %>%
+  ggplot(aes(beta, term, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+
+
+#plotting the similarities of movies
+overview_gamma <- tidy(overview_LDA, matrix = "gamma")
+gamma_wide = overview_gamma %>% pivot_wider(names_from = topic, values_from = gamma)
+distance_gamma = as.matrix(dist(gamma_wide[,2:8]))
+diag(distance_gamma) = 0
+heatmap(distance_gamma)
+
+#plotting tthe top movies at each created topic category
+top_films = overview_gamma %>%
+              group_by(topic) %>%
+              slice_max(gamma, n = 10) %>% 
+              ungroup() %>%
+              arrange(topic, -gamma)
+
+top_films %>%
+  mutate(document = reorder_within(document, gamma, topic)) %>%
+  ggplot(aes(gamma, document, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  scale_y_reordered()
+```
+Based on the typical words plot we can see that the words: town, family, home is present in multiple topics. Topic 1 and Topic 3 are relatively similar, and could be the group of slasher horrors. Topic 2 might be home invasion, Topic 4 is small town mysteries, Topic 5 is zombie movies, 6 is the typical horror setup with college students or couples or friend groups. Topic 7 is something to do with ancient mysteries like vampires.
+
+Based on the heatmap, we can see that the algorithm creates 7 relatively distinct categories, and the categories are more or less similar in size.
+
+Lastly, based on the typical movies plot we can see that the categories are relatively hard to interpret, as some films in topics are of different genres with different main plot and elements (e.g Alien vs Predator and The Rocky Horror Picture Show). So we will not use these categories in the linear regression as the results are hard to interpret.
+
+## Linear Model
+
+### Fitting the model
+We are going to predict the vote average, with the popularity, the runtime, the genres with more then 100 cases, the box office difference and the release year.
+
+```{r linear_model}
+
+mod1 = lm(vote_average ~ popularity + runtime + Mystery + Thriller + Drama + Action + Comedy + `Science Fiction` + box_office_difference + release_year, data = df_clean) 
+
+summary(mod1)
+
+vif(mod1)
+
+```
+The VIF is lower then 5 in every case meaning that there is no multicollinearity issues with the current model. The R-squared is around 0.1 which is a relatively low explained variance proportion.
+We can see that popularity (Beta = 1.733e-03, p = 0.0058), runtime (Beta = 1.184e-02, p = 8.83e-08) Mystery (Beta = 3.094e-01, p = 0.012706), Drama (Beta = 2.942e-01, p = 0.038917), Comedy (Beta = 4.977e-01, p = 0.000674), Science Fiction (Beta = 2.935e-01 p = 0.029798) and the box office difference (Beta = 4.161e-09, p = 1.49e-06)  is in a significant positive relationship with vote average. Release year (Beta = -1.228e-02, p = 0.000542).
+
+### Regression diagnostics
+Based on the residuals vs fitted plot the linear relationship assumption is violated. Similarly the normality of the residuals  is also violated (Normal Q-Q plot), this is also true for the homoscedasticity (Scale location). Based on the Residuals vs Leverage plots, there are multiple outliers, but in this case we are not going to filter them out.
+```{r residuals }
+plot(mod1)
+```
+## Discussion
+In this report we analysed the Horror Movies dataset from the Tidy Tuesday library. 
+First, we cleaned the data and performed exploratory data analysis (plotting, descriptives and topic modeling of the textual data), then we fitted a linear model. 
+
